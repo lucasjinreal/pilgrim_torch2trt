@@ -3,7 +3,7 @@
 this using Pilgrim convert MobileNetV3 to TensorRT engine
 
 """
-from torch2trt.torch2trt import torch2trt
+from torch2trt_dynamic.torch2trt import torch2trt
 import torch
 from torch import nn
 from torchvision.models.resnet import resnet50
