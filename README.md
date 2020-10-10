@@ -26,8 +26,20 @@ You can check models under examples folder. For install it, simply:
 sudo python3 setup.py build develop
 ```
 
+For Highly complicated model, such as FasterRCNN, MaskRCNN, YoloV5, Centernet-DCN, you gonna need build plugins for support:
+
+```
+cd pilgrim_trt_plugins
+./build.sh
+```
+
+the plugins will update every frequently, so pls make sure your repo is up to date.
+
+
+
 ## TODO
 
+- [ ] Try converting FasterRCNN model to TensorRT with pilgrim tool;
 - [ ] Try converting YoloV5 model to tensorrt with pilgrim tool;
 - [ ] Try converting CenterNet-DCN to tensorrt with pilgrim tool (this will invoke DCN plugin directly mapping pytorch plugin to TensorRT plugin without any ONNX dependencies);
 
