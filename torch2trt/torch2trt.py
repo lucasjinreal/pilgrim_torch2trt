@@ -6,7 +6,10 @@ import time
 from .calibration import TensorBatchDataset, DatasetCalibrator, DEFAULT_CALIBRATION_ALGORITHM
 from .shape_converter import ShapeConverter
 
+from alfred.utils.log import logger as logging
+
 # UTILITY FUNCTIONS
+
 
 def torch_dtype_to_trt(dtype):
     if dtype == torch.bool:
@@ -97,15 +100,17 @@ def check_torch_dtype(*tensors):
     for t in tensors:
         if isinstance(t, torch.Tensor):
             if dtype is None:
-                if t.dtype==torch.long:
-                    dtype=torch.int32
+                if t.dtype == torch.long:
+                    dtype = torch.int32
                 else:
                     dtype = t.dtype
             else:
-                if t.dtype==torch.long:
-                    assert(dtype == torch.int32)  # , 'Tensor data types must match')
+                if t.dtype == torch.long:
+                    # , 'Tensor data types must match')
+                    assert(dtype == torch.int32)
                 else:
-                    assert(dtype == t.dtype)  # , 'Tensor data types must match')
+                    # , 'Tensor data types must match')
+                    assert(dtype == t.dtype)
 
     for t in tensors:
         if isinstance(t, float):
@@ -122,6 +127,49 @@ def check_torch_dtype(*tensors):
     # , 'Data type could not be inferred from any item in list')
     assert(dtype is not None)
     return dtype
+
+
+def add_missing_trt_tensors(network, tensors):
+    """Creates missing TensorRT tensors as constants and attaches them to the Torch Tensors"""
+    trt_tensors = [None] * len(tensors)
+
+    dtype = check_torch_dtype(*tensors)
+
+    for i, t in enumerate(tensors):
+        trt_tensor = None
+
+        # GET TRT TENSOR (OR CREATE TRT CONSTANT)
+
+        # get tensor w/ _trt
+        # or... add constant for scalar primitive
+        if isinstance(t, float) or isinstance(t, int):
+            shape = (1,)
+            scalar = t * torch.ones(shape, dtype=dtype).cpu().numpy()
+            trt_tensor = network.add_constant(shape, scalar).get_output(0)
+        elif hasattr(t, "_trt"):
+            trt_tensor = t._trt
+
+        # or... add constant for leaf tensor w/o _trt
+        else:
+
+            # remove all preceding ones, these can be re-inserted later when broadcasting
+            num_preceding_ones = 0
+            for j in range(len(t.shape)):
+                if int(t.shape[j]) == 1:
+                    num_preceding_ones += 1
+                else:
+                    break
+            shape = tuple(t.shape[num_preceding_ones:])
+
+            weight = t.detach().cpu().numpy()
+            t._trt = network.add_constant(shape, weight).get_output(0)
+            trt_tensor = t._trt
+
+        assert trt_tensor is not None
+
+        trt_tensors[i] = trt_tensor
+
+    return trt_tensors
 
 
 def trt_(network, *tensors):
@@ -156,7 +204,7 @@ def trt_(network, *tensors):
         elif isinstance(t, torch.Tensor) and not hasattr(t, '_trt'):
             # add leaf tensor
             # don't exclude batch when adding constants...?
-            is_const=True
+            is_const = True
             shape = tuple(t.shape)
             weight = t.detach().cpu().numpy()
             if weight.dtype == np.float64:
@@ -175,8 +223,8 @@ def trt_(network, *tensors):
 
         # or... add constant for scalar primitive
         elif isinstance(t, float) or isinstance(t, int):
-            is_const=True
-            shape = (1,)# * broadcast_num_dim
+            is_const = True
+            shape = (1,)  # * broadcast_num_dim
             scalar = t * torch.ones(shape, dtype=dtype).cpu().numpy()
             trt_tensor = network.add_constant(shape, scalar).get_output(0)
 
@@ -198,7 +246,8 @@ def trt_(network, *tensors):
                 scalar = torch.ones(shape, dtype=torch.int32).cpu().numpy()
                 trt_ones = network.add_constant(shape, scalar).get_output(0)
                 trt_shape = tensor_trt_get_shape_trt(network, trt_tensor)
-                trt_shape = network.add_concatenation([trt_ones, trt_shape]).get_output(0)
+                trt_shape = network.add_concatenation(
+                    [trt_ones, trt_shape]).get_output(0)
                 layer = network.add_shuffle(trt_tensor)
                 layer.set_input(1, trt_shape)
                 trt_tensor = layer.get_output(0)
@@ -213,18 +262,18 @@ def trt_(network, *tensors):
 
 def slice_shape_trt(network, shape_trt, start=0, size=None, stride=1):
     shape_trt_dim = shape_trt.shape[0]
-    if start==0 and stride==1 and (size is None or size==shape_trt_dim):
+    if start == 0 and stride == 1 and (size is None or size == shape_trt_dim):
         return shape_trt
 
     if start >= shape_trt_dim:
         return None
-    
+
     if size == 0:
         return None
 
     if size is None:
         size = shape_trt_dim - start
-    
+
     return network.add_slice(shape_trt, [start], [size], [stride]).get_output(0)
 
 
@@ -248,8 +297,9 @@ def trt_cast(network, val_trt, data_type):
     layer.set_output_type(0, data_type)
     val_trt = layer.get_output(0)
 
-    if len(val_trt.shape)==1:
-        layer = network.add_elementwise(trt_(network, torch.zeros((1,), dtype=zeros_type)), val_trt, trt.ElementWiseOperation.SUM)
+    if len(val_trt.shape) == 1:
+        layer = network.add_elementwise(trt_(network, torch.zeros(
+            (1,), dtype=zeros_type)), val_trt, trt.ElementWiseOperation.SUM)
         layer.set_output_type(0, data_type)
         val_trt = layer.get_output(0)
 
@@ -320,6 +370,7 @@ class ConversionHook(object):
         exec('%s = method' % self.method_str)
 
     def __enter__(self):
+        # logging.info('conversion: {}'.format(self.method_str))
         if not self.method_str.startswith('torch.'):
             module_name = self.method_str.split('.')[0]
             try:
@@ -434,7 +485,7 @@ class TRTModule(torch.nn.Module):
 
         for i, input_name in enumerate(self.input_names):
             idx = self.engine.get_binding_index(input_name)
-            
+
             self.context.set_binding_shape(idx, tuple(inputs[i].shape))
             bindings[idx] = inputs[i].contiguous().data_ptr()
 
@@ -545,7 +596,7 @@ def torch2trt(module,
         config.set_calibration_profile(profile)
         builder.int8_mode = int8_mode
         builder.int8_calibrator = config.int8_calibrator
-                
+
     engine = builder.build_engine(network, config)
 
     module_trt = TRTModule(engine, ctx.input_names, ctx.output_names)
